@@ -42,7 +42,8 @@ export interface DisplayEmoji {
   id: string;
   name: string;
   collection: CollectionName;
-  staticPath: string;
+  staticPath?: string;
+  fallbackText?: string;
   animatedPath?: string;
   associateWords: string[];
   assets: QqAsset[];
