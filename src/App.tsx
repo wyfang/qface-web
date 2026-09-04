@@ -1,5 +1,6 @@
 import {
   Button,
+  Disclosure,
   Popover,
   ProgressBar,
   SearchField,
@@ -139,6 +140,8 @@ const MAX_STORED_RECENT = 40;
 const MOBILE_LONG_PRESS_DELAY = 520;
 const MOBILE_LONG_PRESS_MOVE_TOLERANCE = 10;
 const MOBILE_LONG_PRESS_RELEASE_GUARD = 600;
+const HOVER_PREVIEW_DELAY = 180;
+const MENU_CLOSE_DELAY = 1000;
 const TOAST_EXIT_DURATION = 200;
 const COPY_CANCEL_DELAY = 3000;
 const loadedThumbnailUrls = new Set<string>();
@@ -486,11 +489,9 @@ function EmojiThumbnail({ item }: { item: DisplayEmoji }) {
 
   return (
     <span className="emoji-thumbnail" data-load-state={loadState}>
-      {loadState !== "loaded" ? (
-        <span className="emoji-image-placeholder" aria-hidden="true">
-          <Smile size={21} strokeWidth={1.55} />
-        </span>
-      ) : null}
+      <span className="emoji-image-placeholder" aria-hidden="true">
+        <Smile size={32} strokeWidth={1.7} />
+      </span>
       <img
         alt=""
         decoding="async"
@@ -564,7 +565,7 @@ function PreviewMedia({
       data-load-state={loadState}
       aria-busy={loadState === "loading"}
     >
-      {hasRemoteMedia && loadState === "error" ? (
+      {hasRemoteMedia ? (
         <span className="preview-image-placeholder" aria-hidden="true">
           <Smile size={38} strokeWidth={1.35} />
         </span>
@@ -597,7 +598,7 @@ function PreviewMedia({
         </span>
       )}
 
-      {loadState === "loading" ? (
+      {hasRemoteMedia ? (
         <span className="preview-loading-spinner" aria-label="正在加载表情预览">
           <Spinner size="md" />
         </span>
@@ -618,6 +619,8 @@ const EmojiButton = memo(function EmojiButton({
   onClose,
   onCopy,
   onOpenMenu,
+  onMenuEnter,
+  onMenuLeave,
   onLongPressRelease,
   triggerRef,
 }: {
@@ -636,6 +639,8 @@ const EmojiButton = memo(function EmojiButton({
     entryKey: string,
     guardRelease?: boolean,
   ) => void;
+  onMenuEnter: () => void;
+  onMenuLeave: () => void;
   onLongPressRelease: (entryKey: string) => void;
   triggerRef: RefObject<HTMLButtonElement | null>;
 }) {
@@ -714,11 +719,15 @@ const EmojiButton = memo(function EmojiButton({
       }}
       onPointerDownCapture={handlePointerDown}
       onPointerEnter={(event) => {
-        if (event.pointerType === "mouse") onOpen(item, entryKey);
+        if (event.pointerType !== "mouse") return;
+        if (isMenuOpen) onMenuEnter();
+        else onOpen(item, entryKey);
       }}
       onPointerLeave={(event) => {
-        if (event.pointerType === "mouse") onClose(entryKey);
-        else cancelLongPressTimer();
+        if (event.pointerType === "mouse") {
+          if (isMenuOpen) onMenuLeave();
+          else onClose(entryKey);
+        } else cancelLongPressTimer();
       }}
       onPointerMoveCapture={handlePointerMove}
       onPointerUpCapture={() => {
@@ -769,6 +778,8 @@ export default function App() {
   const [copyingKey, setCopyingKey] = useState("");
   const [lastCopiedKey, setLastCopiedKey] = useState("");
   const [copyTask, setCopyTask] = useState<CopyTaskState | null>(null);
+  const previewOpenTimerRef = useRef<number | null>(null);
+  const pendingPreviewKeyRef = useRef("");
   const closeTimer = useRef<number | null>(null);
   const copyingKeyRef = useRef("");
   const copyControllerRef = useRef<AbortController | null>(null);
@@ -777,6 +788,7 @@ export default function App() {
   const copyExitTimerRef = useRef<number | null>(null);
   const menuPressGuardRef = useRef("");
   const menuPressGuardTimerRef = useRef<number | null>(null);
+  const menuCloseTimerRef = useRef<number | null>(null);
   const suppressHoverRef = useRef(false);
   const activeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const emojiGridRef = useRef<HTMLDivElement | null>(null);
@@ -829,6 +841,9 @@ export default function App() {
 
   useEffect(
     () => () => {
+      if (previewOpenTimerRef.current !== null) {
+        window.clearTimeout(previewOpenTimerRef.current);
+      }
       if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
       if (copyCancelTimerRef.current !== null) {
         window.clearTimeout(copyCancelTimerRef.current);
@@ -841,6 +856,9 @@ export default function App() {
       }
       if (menuPressGuardTimerRef.current !== null) {
         window.clearTimeout(menuPressGuardTimerRef.current);
+      }
+      if (menuCloseTimerRef.current !== null) {
+        window.clearTimeout(menuCloseTimerRef.current);
       }
       copyControllerRef.current?.abort();
     },
@@ -1007,17 +1025,35 @@ export default function App() {
     }
   }, []);
 
-  const openPreview = useCallback((item: DisplayEmoji, entryKey: string) => {
-    if (suppressHoverRef.current) return;
-    cancelClose();
-    if (menuKey) return;
-    setOpenKey((current) => {
-      if (current !== entryKey) {
-        setPreviewMode(hasAnimatedPreview(item) ? "animated" : "static");
-      }
-      return entryKey;
-    });
-  }, [cancelClose, menuKey]);
+  const cancelPreviewOpen = useCallback((entryKey?: string) => {
+    if (entryKey && pendingPreviewKeyRef.current !== entryKey) return;
+    if (previewOpenTimerRef.current !== null) {
+      window.clearTimeout(previewOpenTimerRef.current);
+      previewOpenTimerRef.current = null;
+    }
+    pendingPreviewKeyRef.current = "";
+  }, []);
+
+  const openPreview = useCallback(
+    (item: DisplayEmoji, entryKey: string) => {
+      if (suppressHoverRef.current || menuKey) return;
+      cancelClose();
+      cancelPreviewOpen();
+      pendingPreviewKeyRef.current = entryKey;
+      previewOpenTimerRef.current = window.setTimeout(() => {
+        previewOpenTimerRef.current = null;
+        if (pendingPreviewKeyRef.current !== entryKey) return;
+        pendingPreviewKeyRef.current = "";
+        setOpenKey((current) => {
+          if (current !== entryKey) {
+            setPreviewMode(hasAnimatedPreview(item) ? "animated" : "static");
+          }
+          return entryKey;
+        });
+      }, HOVER_PREVIEW_DELAY);
+    },
+    [cancelClose, cancelPreviewOpen, menuKey],
+  );
 
   const resumePreviewOnMove = useCallback(
     (item: DisplayEmoji, entryKey: string) => {
@@ -1029,6 +1065,7 @@ export default function App() {
   );
 
   const closePreviewSoon = useCallback((key: string) => {
+    cancelPreviewOpen(key);
     cancelClose();
     closeTimer.current = window.setTimeout(() => {
       const pointerStillInside = document.querySelector(
@@ -1038,10 +1075,10 @@ export default function App() {
         closeTimer.current = null;
         return;
       }
-      setOpenKey((current) => (current === key ? "" : current));
+      setOpenKey("");
       closeTimer.current = null;
     }, 80);
-  }, [cancelClose]);
+  }, [cancelClose, cancelPreviewOpen]);
 
   const releaseLongPressGuard = useCallback((entryKey: string) => {
     if (menuPressGuardTimerRef.current !== null) {
@@ -1055,9 +1092,26 @@ export default function App() {
     }, MOBILE_LONG_PRESS_RELEASE_GUARD);
   }, []);
 
+  const cancelMenuClose = useCallback(() => {
+    if (menuCloseTimerRef.current !== null) {
+      window.clearTimeout(menuCloseTimerRef.current);
+      menuCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const closeMenuSoon = useCallback(() => {
+    cancelMenuClose();
+    menuCloseTimerRef.current = window.setTimeout(() => {
+      setMenuKey("");
+      menuCloseTimerRef.current = null;
+    }, MENU_CLOSE_DELAY);
+  }, [cancelMenuClose]);
+
   const openMoreMenu = useCallback(
     (item: DisplayEmoji, entryKey: string, guardRelease = false) => {
+      cancelPreviewOpen();
       cancelClose();
+      cancelMenuClose();
       if (guardRelease) {
         menuPressGuardRef.current = entryKey;
       }
@@ -1065,10 +1119,28 @@ export default function App() {
       setPreviewMode(hasAnimatedPreview(item) ? "animated" : "static");
       setMenuKey(entryKey);
     },
-    [cancelClose],
+    [cancelClose, cancelMenuClose, cancelPreviewOpen],
   );
 
+  useEffect(() => {
+    if (!menuKey) return;
+
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      const menu = document.querySelector(".emoji-popover--menu");
+      if (menu?.contains(event.target as Node)) return;
+      cancelMenuClose();
+      setMenuKey("");
+    };
+
+    document.addEventListener("pointerdown", handleOutsidePointerDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
+    };
+  }, [cancelMenuClose, menuKey]);
+
   function selectCollection(nextCollection: CollectionName) {
+    cancelPreviewOpen();
+    cancelMenuClose();
     setCollection(nextCollection);
     setQuery("");
     setOpenKey("");
@@ -1567,6 +1639,8 @@ export default function App() {
                       isCopySelected={isCopySelected}
                       onClose={closePreviewSoon}
                       onLongPressRelease={releaseLongPressGuard}
+                      onMenuEnter={cancelMenuClose}
+                      onMenuLeave={closeMenuSoon}
                       onOpenMenu={openMoreMenu}
                       onCopy={handleGridCopy}
                       onMove={resumePreviewOnMove}
@@ -1629,6 +1703,8 @@ export default function App() {
                     isCopySelected={isCopySelected}
                     onClose={closePreviewSoon}
                     onLongPressRelease={releaseLongPressGuard}
+                    onMenuEnter={cancelMenuClose}
+                    onMenuLeave={closeMenuSoon}
                     onOpenMenu={openMoreMenu}
                     onCopy={handleGridCopy}
                     onMove={resumePreviewOnMove}
@@ -1638,6 +1714,7 @@ export default function App() {
 
                   {isActive ? (
                     <Popover.Content
+                      key={`${renderKey}-${isMenuOpen ? "menu" : "preview"}`}
                       className={`emoji-popover ${
                         isMenuOpen
                           ? "emoji-popover--expanded emoji-popover--menu"
@@ -1649,12 +1726,23 @@ export default function App() {
                       offset={5}
                       shouldFlip
                       triggerRef={activeTriggerRef}
+                      onPointerEnter={(event) => {
+                        if (isMenuOpen && event.pointerType === "mouse") {
+                          cancelMenuClose();
+                        }
+                      }}
+                      onPointerLeave={(event) => {
+                        if (isMenuOpen && event.pointerType === "mouse") {
+                          closeMenuSoon();
+                        }
+                      }}
                       onOpenChange={(nextOpen) => {
                         if (
                           !nextOpen &&
                           isMenuOpen &&
                           menuPressGuardRef.current !== renderKey
                         ) {
+                          cancelMenuClose();
                           setMenuKey("");
                         }
                       }}
@@ -1778,47 +1866,56 @@ export default function App() {
                             </div>
 
                             {sourceAssets.length ? (
-                              <details className="source-assets">
-                                <summary>
-                                  原始文件 · {sourceAssets.length}
-                                </summary>
-                                <div className="source-list">
-                                  {sourceAssets.map((asset, index) => (
-                                    <div
-                                      className="source-row"
-                                      key={`${asset.path}-${index}`}
-                                    >
-                                      <span>{assetLabel(asset)}</span>
-                                      <span title={asset.name}>{asset.name}</span>
-                                      <Button
-                                        isIconOnly
-                                        aria-label={`下载 ${asset.name}`}
-                                        size="sm"
-                                        variant="tertiary"
-                                        onPress={() => {
-                                          downloadAsset(asset);
-                                          showAppToast(
-                                            `${asset.name} 已下载`,
-                                            "success",
-                                            2200,
-                                          );
-                                        }}
-                                      >
-                                        <Download size={12} />
-                                      </Button>
-                                      <Button
-                                        isIconOnly
-                                        aria-label={`打开 ${asset.name}`}
-                                        size="sm"
-                                        variant="tertiary"
-                                        onPress={() => openAsset(asset.path)}
-                                      >
-                                        <ExternalLink size={12} />
-                                      </Button>
+                              <Disclosure className="source-assets">
+                                <Disclosure.Heading className="source-assets__heading">
+                                  <Disclosure.Trigger className="source-assets__trigger">
+                                    <span>原始文件 · {sourceAssets.length}</span>
+                                    <Disclosure.Indicator />
+                                  </Disclosure.Trigger>
+                                </Disclosure.Heading>
+                                <Disclosure.Content className="source-assets__content">
+                                  <Disclosure.Body className="source-assets__body">
+                                    <div className="source-list">
+                                      {sourceAssets.map((asset, index) => (
+                                        <div
+                                          className="source-row"
+                                          key={`${asset.path}-${index}`}
+                                        >
+                                          <span>{assetLabel(asset)}</span>
+                                          <span title={asset.name}>
+                                            {asset.name}
+                                          </span>
+                                          <Button
+                                            isIconOnly
+                                            aria-label={`下载 ${asset.name}`}
+                                            size="sm"
+                                            variant="ghost"
+                                            onPress={() => {
+                                              downloadAsset(asset);
+                                              showAppToast(
+                                                `${asset.name} 已下载`,
+                                                "success",
+                                                2200,
+                                              );
+                                            }}
+                                          >
+                                            <Download size={12} />
+                                          </Button>
+                                          <Button
+                                            isIconOnly
+                                            aria-label={`打开 ${asset.name}`}
+                                            size="sm"
+                                            variant="ghost"
+                                            onPress={() => openAsset(asset.path)}
+                                          >
+                                            <ExternalLink size={12} />
+                                          </Button>
+                                        </div>
+                                      ))}
                                     </div>
-                                  ))}
-                                </div>
-                              </details>
+                                  </Disclosure.Body>
+                                </Disclosure.Content>
+                              </Disclosure>
                             ) : null}
                           </div>
                         ) : null}
