@@ -1,6 +1,7 @@
 import {
   Button,
   Popover,
+  ProgressBar,
   SearchField,
   Spinner,
   Toast,
@@ -16,6 +17,7 @@ import {
   Moon,
   Play,
   RotateCcw,
+  Smile,
   Sun,
 } from "lucide-react";
 import {
@@ -23,7 +25,6 @@ import {
   memo,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -61,22 +62,22 @@ type EmojiGridItemEntry = {
   isRecent: boolean;
   renderKey: string;
 };
+type EmojiGridPlaceholderEntry = {
+  kind: "recent-placeholder";
+  renderKey: string;
+};
 type EmojiGridEntry =
   | EmojiGridItemEntry
+  | EmojiGridPlaceholderEntry
   | "recent-label"
   | "recent-divider"
   | "lottie-label"
   | "lottie-divider";
-type PendingViewportAnchor = {
-  key: string;
-  top: number;
-  fallbackLeft: number;
-  fallbackTop: number;
-};
 type PreparedGif = {
   blob: Blob;
   generated: boolean;
 };
+type MediaLoadState = "loading" | "loaded" | "error";
 
 const SKIP_UNDERSCORE_PNG_IDS = new Set(["342", "466", "468", "469"]);
 const STATIC_PREVIEW_OVERRIDE_IDS = new Set(["466", "468", "469"]);
@@ -368,17 +369,126 @@ async function prepareGif(item: DisplayEmoji): Promise<PreparedGif> {
 }
 
 function EmojiThumbnail({ item }: { item: DisplayEmoji }) {
-  return item.staticPath ? (
-    <img
-      src={assetUrl(item.staticPath)}
-      alt=""
-      loading="lazy"
-      decoding="async"
-    />
-  ) : (
-    <span className="emoji-glyph" aria-hidden="true">
-      {item.fallbackText}
+  const src = item.staticPath ? assetUrl(item.staticPath) : "";
+  const [loadRecord, setLoadRecord] = useState<{
+    src: string;
+    state: MediaLoadState;
+  }>(() => ({ src, state: src ? "loading" : "loaded" }));
+  const loadState =
+    loadRecord.src === src
+      ? loadRecord.state
+      : src
+        ? "loading"
+        : "loaded";
+
+  if (!src) {
+    return (
+      <span className="emoji-glyph" aria-hidden="true">
+        {item.fallbackText}
+      </span>
+    );
+  }
+
+  return (
+    <span className="emoji-thumbnail" data-load-state={loadState}>
+      {loadState !== "loaded" ? (
+        <span className="emoji-image-placeholder" aria-hidden="true">
+          <Smile size={21} strokeWidth={1.55} />
+        </span>
+      ) : null}
+      <img
+        alt=""
+        decoding="async"
+        draggable={false}
+        loading="lazy"
+        src={src}
+        onError={() => setLoadRecord({ src, state: "error" })}
+        onLoad={() => setLoadRecord({ src, state: "loaded" })}
+      />
     </span>
+  );
+}
+
+function PreviewMedia({
+  item,
+  lottieSrc,
+  previewPath,
+  previewMode,
+}: {
+  item: DisplayEmoji;
+  lottieSrc?: string;
+  previewPath?: string;
+  previewMode: PreviewMode;
+}) {
+  const imageSrc = previewPath ? assetUrl(previewPath) : "";
+  const hasRemoteMedia = Boolean(lottieSrc || imageSrc);
+  const mediaKey = lottieSrc || imageSrc || item.fallbackText || item.key;
+  const [loadRecord, setLoadRecord] = useState<{
+    key: string;
+    state: MediaLoadState;
+  }>(() => ({
+    key: mediaKey,
+    state: hasRemoteMedia ? "loading" : "loaded",
+  }));
+  const loadState =
+    loadRecord.key === mediaKey
+      ? loadRecord.state
+      : hasRemoteMedia
+        ? "loading"
+        : "loaded";
+
+  return (
+    <div
+      className="preview-media"
+      data-load-state={loadState}
+      aria-busy={loadState === "loading"}
+    >
+      {hasRemoteMedia && loadState !== "loaded" ? (
+        <span className="preview-image-placeholder" aria-hidden="true">
+          <Smile size={38} strokeWidth={1.35} />
+        </span>
+      ) : null}
+
+      {lottieSrc ? (
+        <LottiePreview
+          key={mediaKey}
+          label={`${item.name} Lottie 动画`}
+          src={lottieSrc}
+          onError={() => setLoadRecord({ key: mediaKey, state: "error" })}
+          onLoad={() => setLoadRecord({ key: mediaKey, state: "loaded" })}
+        />
+      ) : imageSrc ? (
+        <img
+          key={`${item.key}-${previewMode}`}
+          alt={item.name}
+          decoding="async"
+          draggable={false}
+          src={imageSrc}
+          onError={() => setLoadRecord({ key: mediaKey, state: "error" })}
+          onLoad={() => setLoadRecord({ key: mediaKey, state: "loaded" })}
+        />
+      ) : (
+        <span
+          className="emoji-glyph emoji-glyph--preview"
+          aria-label={item.name}
+        >
+          {item.fallbackText}
+        </span>
+      )}
+
+      {loadState === "loading" ? (
+        <ProgressBar
+          isIndeterminate
+          aria-label="正在加载表情预览"
+          className="preview-loading-bar"
+          size="sm"
+        >
+          <ProgressBar.Track>
+            <ProgressBar.Fill />
+          </ProgressBar.Track>
+        </ProgressBar>
+      ) : null}
+    </div>
   );
 }
 
@@ -388,6 +498,7 @@ const EmojiButton = memo(function EmojiButton({
   isRecent,
   isActive,
   isMenuOpen,
+  isCopying,
   onOpen,
   onMove,
   onClose,
@@ -400,10 +511,11 @@ const EmojiButton = memo(function EmojiButton({
   isRecent: boolean;
   isActive: boolean;
   isMenuOpen: boolean;
+  isCopying: boolean;
   onOpen: (item: DisplayEmoji, entryKey: string) => void;
   onMove: (item: DisplayEmoji, entryKey: string) => void;
   onClose: (key: string) => void;
-  onCopy: (item: DisplayEmoji) => void;
+  onCopy: (item: DisplayEmoji, entryKey: string) => void;
   onContextMenu: (
     item: DisplayEmoji,
     event: ReactMouseEvent<HTMLDivElement>,
@@ -414,6 +526,7 @@ const EmojiButton = memo(function EmojiButton({
   return (
     <div
       className="emoji-cell"
+      aria-busy={isCopying}
       data-emoji-key={item.key}
       data-entry-key={entryKey}
       data-recent={isRecent ? "true" : undefined}
@@ -426,13 +539,23 @@ const EmojiButton = memo(function EmojiButton({
         ref={isActive ? triggerRef : undefined}
         className="emoji-button"
         isIconOnly
+        isPending={isCopying}
         aria-expanded={isMenuOpen}
         aria-haspopup="menu"
-        aria-label={`复制 ${item.name}，编号 ${item.id}`}
+        aria-label={
+          isCopying
+            ? `正在准备复制 ${item.name}`
+            : `复制 ${item.name}，编号 ${item.id}`
+        }
         variant="ghost"
-        onPress={() => onCopy(item)}
+        onPress={() => onCopy(item, entryKey)}
       >
         <EmojiThumbnail item={item} />
+        {isCopying ? (
+          <span className="emoji-copy-status" aria-hidden="true">
+            <Spinner color="current" size="sm" />
+          </span>
+        ) : null}
       </Button>
     </div>
   );
@@ -455,11 +578,12 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [gifDownloadKey, setGifDownloadKey] = useState("");
+  const [copyingKey, setCopyingKey] = useState("");
   const closeTimer = useRef<number | null>(null);
+  const copyingKeyRef = useRef("");
   const suppressHoverRef = useRef(false);
   const activeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const emojiGridRef = useRef<HTMLDivElement | null>(null);
-  const pendingViewportAnchorRef = useRef<PendingViewportAnchor | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -572,13 +696,21 @@ export default function App() {
   const gridEntries = useMemo<EmojiGridEntry[]>(
     () => {
       const entries: EmojiGridEntry[] = [];
-      if (visibleRecentItems.length) {
+      if (!query.trim()) {
+        const placeholderCount = Math.max(
+          0,
+          recentLimit - visibleRecentItems.length,
+        );
         entries.push(
           "recent-label",
           ...visibleRecentItems.map((item) => ({
             item,
             isRecent: true,
             renderKey: `recent-${item.key}`,
+          })),
+          ...Array.from({ length: placeholderCount }, (_, index) => ({
+            kind: "recent-placeholder" as const,
+            renderKey: `recent-placeholder-${index}`,
           })),
           "recent-divider",
         );
@@ -590,34 +722,11 @@ export default function App() {
       }
       return entries;
     },
-    [listEntries, lottieEntries, visibleRecentItems],
+    [listEntries, lottieEntries, query, recentLimit, visibleRecentItems],
   );
 
   useEffect(() => {
     window.localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(recentKeys));
-  }, [recentKeys]);
-
-  useLayoutEffect(() => {
-    const pending = pendingViewportAnchorRef.current;
-    if (!pending) return;
-
-    pendingViewportAnchorRef.current = null;
-    const grid = emojiGridRef.current;
-    const anchor = grid
-      ? Array.from(
-          grid.querySelectorAll<HTMLElement>(
-            '.emoji-cell[data-emoji-key]:not([data-recent="true"])',
-          ),
-        ).find((element) => element.dataset.emojiKey === pending.key)
-      : null;
-
-    if (!anchor) {
-      window.scrollTo(pending.fallbackLeft, pending.fallbackTop);
-      return;
-    }
-
-    const offset = anchor.getBoundingClientRect().top - pending.top;
-    if (Math.abs(offset) > 0.5) window.scrollBy(0, offset);
   }, [recentKeys]);
 
   useEffect(() => {
@@ -669,7 +778,10 @@ export default function App() {
   useEffect(() => {
     const hasVisibleEntry = (key: string) =>
       gridEntries.some(
-        (entry) => typeof entry !== "string" && entry.renderKey === key,
+        (entry) =>
+          typeof entry !== "string" &&
+          "item" in entry &&
+          entry.renderKey === key,
       );
     if (openKey && !hasVisibleEntry(openKey)) {
       setOpenKey("");
@@ -799,48 +911,15 @@ export default function App() {
     ].slice(0, MAX_STORED_RECENT));
   }, []);
 
-  const captureViewportAnchor = useCallback(() => {
-    const fallbackLeft = window.scrollX;
-    const fallbackTop = window.scrollY;
-    const grid = emojiGridRef.current;
-
-    if (!grid || fallbackTop <= 1) {
-      pendingViewportAnchorRef.current = {
-        key: "",
-        top: 0,
-        fallbackLeft,
-        fallbackTop,
-      };
-      return;
-    }
-
-    const anchor = Array.from(
-      grid.querySelectorAll<HTMLElement>(
-        '.emoji-cell[data-emoji-key]:not([data-recent="true"])',
-      ),
-    )
-      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
-      .filter(
-        ({ rect }) => rect.bottom > 0 && rect.top < window.innerHeight,
-      )
-      .sort(
-        (a, b) => Math.abs(a.rect.top - 16) - Math.abs(b.rect.top - 16),
-      )[0];
-
-    pendingViewportAnchorRef.current = {
-      key: anchor?.element.dataset.emojiKey || "",
-      top: anchor?.rect.top || 0,
-      fallbackLeft,
-      fallbackTop,
-    };
-  }, []);
-
   const handleQuickCopy = useCallback(
-    (item: DisplayEmoji) => {
+    (item: DisplayEmoji, entryKey: string) => {
+      if (copyingKeyRef.current) return;
+      copyingKeyRef.current = entryKey;
+      setCopyingKey(entryKey);
+
       void copyEmoji(item)
         .then((message) => {
           suppressHoverRef.current = true;
-          captureViewportAnchor();
           setOpenKey("");
           setMenuKey("");
           rememberRecent(item);
@@ -852,9 +931,13 @@ export default function App() {
             "danger",
             2800,
           );
+        })
+        .finally(() => {
+          copyingKeyRef.current = "";
+          setCopyingKey("");
         });
     },
-    [captureViewportAnchor, copyEmoji, rememberRecent],
+    [copyEmoji, rememberRecent],
   );
 
   async function handleDownloadGif(item: DisplayEmoji) {
@@ -999,6 +1082,15 @@ export default function App() {
               if (entry === "lottie-divider") {
                 return <div className="lottie-divider" key={entry} />;
               }
+              if ("kind" in entry) {
+                return (
+                  <div
+                    aria-hidden="true"
+                    className="recent-placeholder"
+                    key={entry.renderKey}
+                  />
+                );
+              }
               const { item, isRecent, renderKey } = entry;
               const isPreviewOpen = openKey === renderKey;
               const isMenuOpen = menuKey === renderKey;
@@ -1013,6 +1105,7 @@ export default function App() {
                       isRecent={isRecent}
                       isActive={false}
                       isMenuOpen={false}
+                      isCopying={copyingKey === renderKey}
                       onClose={closePreviewSoon}
                       onContextMenu={openContextMenu}
                       onCopy={handleQuickCopy}
@@ -1073,6 +1166,7 @@ export default function App() {
                     isRecent={isRecent}
                     isActive
                     isMenuOpen={isMenuOpen}
+                    isCopying={copyingKey === renderKey}
                     onClose={closePreviewSoon}
                     onContextMenu={openContextMenu}
                     onCopy={handleQuickCopy}
@@ -1114,28 +1208,18 @@ export default function App() {
                             />
                           </svg>
                         </Popover.Arrow>
-                        <div className="preview-media">
-                          {lottiePreviewAsset ? (
-                            <LottiePreview
-                              label={`${item.name} Lottie 动画`}
-                              src={assetUrl(lottiePreviewAsset.path)}
-                            />
-                          ) : previewPath ? (
-                            <img
-                              key={`${item.key}-${previewMode}`}
-                              src={assetUrl(previewPath)}
-                              alt={item.name}
-                            />
-                          ) : (
-                            <span
-                              className="emoji-glyph emoji-glyph--preview"
-                              aria-label={item.name}
-                            >
-                              {item.fallbackText}
-                            </span>
-                          )}
-
-                        </div>
+                        <PreviewMedia
+                          item={item}
+                          lottieSrc={
+                            lottiePreviewAsset
+                              ? assetUrl(lottiePreviewAsset.path)
+                              : undefined
+                          }
+                          previewMode={previewMode}
+                          previewPath={
+                            lottiePreviewAsset ? undefined : previewPath
+                          }
+                        />
 
                         {isMenuOpen ? (
                           <div className="preview-details">
@@ -1197,12 +1281,17 @@ export default function App() {
                                 <Button
                                   aria-label="复制 GIF"
                                   className="preview-action"
+                                  isPending={copyingKey === renderKey}
                                   size="sm"
                                   variant="secondary"
-                                  onPress={() => handleQuickCopy(item)}
+                                  onPress={() => handleQuickCopy(item, renderKey)}
                                 >
-                                  <Clipboard size={13} />
-                                  复制
+                                  {copyingKey === renderKey ? (
+                                    <Spinner color="current" size="sm" />
+                                  ) : (
+                                    <Clipboard size={13} />
+                                  )}
+                                  {copyingKey === renderKey ? "复制中" : "复制"}
                                 </Button>
                                 <Button
                                   aria-label="下载 GIF"
