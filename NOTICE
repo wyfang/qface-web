@@ -1,0 +1,18 @@
+QFace Web
+
+This project is based on koishijs/QFace:
+https://github.com/koishijs/QFace
+
+Starting upstream revision:
+f835d447fb5eb4aa9ae733f31d90cdd6d5589093
+
+The upstream source code is provided under the MIT License. The original
+copyright notice and license are retained in LICENSE.
+
+QFace Web replaces the upstream Vue documentation interface with a React and
+HeroUI web interface and adds compact static thumbnails, hover preview, and a
+consolidated resource action panel.
+
+QQ and WeChat emoji assets are third-party materials owned by Tencent. They are
+not granted under the MIT License and are included only for non-commercial
+learning and communication.

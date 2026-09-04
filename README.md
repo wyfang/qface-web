@@ -1,50 +1,48 @@
-# QQNT 表情库
+# QFace Web
 
-探索腾讯QQ的完整表情资源，包含高清图片、APNG 和 Lottie 动画文件。
+基于 QFace 二次开发的轻量表情预览网页，使用小尺寸静态表情网格与悬停动态预览。
 
-## QQNT
+[在线使用](https://play.wangyifang.com/qface-web/) · [上游项目](https://github.com/koishijs/QFace)
 
-> 与 macOS 版同步，由仓库维护者手动同步，可能会有一些表情缺失。
+## 功能
 
-- 在线预览：https://koishi.js.org/QFace/#/qqnt
-- API 接口：https://koishi.js.org/QFace/assets/qq_emoji/_index.json
+- 默认使用静态 PNG 小图浏览，减少动画干扰和资源消耗。
+- 鼠标悬停或键盘聚焦时在上方显示动态预览，点按可锁定当前表情。
+- 支持按名称、编号和关联词搜索 QQ 表情，并可切换微信表情集合。
+- 支持下载 PNG、APNG、GIF 和 Lottie JSON，打开单个源文件。
+- 支持复制静态 PNG、复制 APNG 链接，以及在浏览器中将 APNG 转换为 GIF 后下载。
 
-## 微信
+## 使用
 
-> 不经常更新，可能会有一些表情缺失。
-
-- 在线预览：https://koishi.js.org/QFace/#/wechat
-- API 接口：https://koishi.js.org/QFace/assets/wechat_emoji/_index.json
-
----
-
-## Development
-
-### Generate QQNT Emoji Indexes
-
-> Currently only works on macOS.
+需要 Node.js 22 和 pnpm 10。
 
 ```bash
-pnpm run gen:qqnt
+corepack enable
+pnpm install --frozen-lockfile
+pnpm dev
 ```
 
-What does it do?
-
-1. Reads your `Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ` for latest QQ vendor folder
-2. Find the `global/nt_data/Emoji/emoji-resource/face_config.json` and `nt_data/Emoji/BaseEmojiSyastems/EmojiSystermResource`
-3. Copy the resources to `public/assets/qq_emoji`
-4. Generate the `_index.json` file
-
-### Generate WeChat Emoji Indexes
+生产构建：
 
 ```bash
-pnpm run gen:wechat
+pnpm build
+pnpm preview
 ```
 
-> Currently broken.
+构建产物位于 `dist/`，站点部署路径为 `/qface-web/`。
 
----
+## 部署
 
-所有表情资源均来自腾讯官方，版权归腾讯公司所有。仅供学习交流使用，请勿用于商业用途。
+生产源码保存在本仓库；编译后的静态文件同步到相邻的 `play.wangyifang.com/qface-web/` 目录。
+`play.wangyifang.com` 仓库的 `main` 分支推送后，由 Cloudflare Workers Builds 自动部署。
 
-本仓库代码由 Koishi 团队维护，采用 MIT 协议开源。
+## 说明
+
+表情资源更新脚本会读取本机 QQ 或微信安装目录，仅适用于对应的本机环境。站点本身不需要
+后端、账号或数据库，表情文件由 Cloudflare Static Assets 直接提供。
+
+## 版权说明
+
+本项目基于 [koishijs/QFace](https://github.com/koishijs/QFace) 二次开发，保留上游 MIT
+许可证与版权声明。代码许可证不覆盖 QQ、微信名称及表情资源；表情资源版权归腾讯公司所有，
+本项目仅供非商业学习与交流。详细边界见 [LICENSE_SCOPE.md](./LICENSE_SCOPE.md)。
