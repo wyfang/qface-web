@@ -29,7 +29,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { MouseEvent as ReactMouseEvent, RefObject } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  RefObject,
+} from "react";
 import { LottiePreview } from "./LottiePreview";
 import {
   assetUrl,
@@ -106,6 +110,8 @@ const LOTTIE_ANIMATION_ONLY_IDS = new Set([
 ]);
 const RECENT_STORAGE_KEY = "qface-recent-emojis";
 const MAX_STORED_RECENT = 40;
+const MOBILE_LONG_PRESS_DELAY = 520;
+const MOBILE_LONG_PRESS_MOVE_TOLERANCE = 10;
 const TOAST_EXIT_DURATION = 200;
 const appToastQueue = new ToastQueue({
   maxVisibleToasts: 1,
@@ -409,6 +415,29 @@ function EmojiThumbnail({ item }: { item: DisplayEmoji }) {
   );
 }
 
+function isTouchFirstDevice(): boolean {
+  return window.matchMedia("(hover: none), (pointer: coarse)").matches;
+}
+
+function copyFailureMessage(reason: unknown): string {
+  const errorName = reason instanceof Error ? reason.name : "";
+  const errorMessage = reason instanceof Error ? reason.message : "";
+  const isClipboardLimitation =
+    errorName === "NotAllowedError" ||
+    /clipboard|not allowed|permission|剪贴板|不支持复制|不能复制/i.test(
+      errorMessage,
+    );
+
+  if (isClipboardLimitation) {
+    return isTouchFirstDevice()
+      ? "当前浏览器无法直接复制，请长按表情后下载"
+      : "浏览器未允许复制，请开启剪贴板权限后重试";
+  }
+
+  if (errorMessage === "当前表情没有可复制的内容") return errorMessage;
+  return "复制失败，请稍后重试";
+}
+
 function PreviewMedia({
   item,
   lottieSrc,
@@ -503,7 +532,7 @@ const EmojiButton = memo(function EmojiButton({
   onMove,
   onClose,
   onCopy,
-  onContextMenu,
+  onOpenMenu,
   triggerRef,
 }: {
   item: DisplayEmoji;
@@ -516,13 +545,65 @@ const EmojiButton = memo(function EmojiButton({
   onMove: (item: DisplayEmoji, entryKey: string) => void;
   onClose: (key: string) => void;
   onCopy: (item: DisplayEmoji, entryKey: string) => void;
-  onContextMenu: (
-    item: DisplayEmoji,
-    event: ReactMouseEvent<HTMLDivElement>,
-    entryKey: string,
-  ) => void;
+  onOpenMenu: (item: DisplayEmoji, entryKey: string) => void;
   triggerRef: RefObject<HTMLButtonElement | null>;
 }) {
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressTriggeredRef = useRef(false);
+  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  const cancelLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    pointerStartRef.current = null;
+  }, []);
+
+  useEffect(() => cancelLongPressTimer, [cancelLongPressTimer]);
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse") {
+      longPressTriggeredRef.current = false;
+      return;
+    }
+    if (event.button !== 0 || isCopying) return;
+    cancelLongPressTimer();
+    longPressTriggeredRef.current = false;
+    pointerStartRef.current = { x: event.clientX, y: event.clientY };
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      pointerStartRef.current = null;
+      longPressTriggeredRef.current = true;
+      navigator.vibrate?.(10);
+      onOpenMenu(item, entryKey);
+    }, MOBILE_LONG_PRESS_DELAY);
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse") {
+      onMove(item, entryKey);
+      return;
+    }
+
+    const start = pointerStartRef.current;
+    if (
+      start &&
+      Math.hypot(event.clientX - start.x, event.clientY - start.y) >
+        MOBILE_LONG_PRESS_MOVE_TOLERANCE
+    ) {
+      cancelLongPressTimer();
+    }
+  };
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
+      return;
+    }
+    event.preventDefault();
+    onOpenMenu(item, entryKey);
+  };
+
   return (
     <div
       className="emoji-cell"
@@ -530,10 +611,23 @@ const EmojiButton = memo(function EmojiButton({
       data-emoji-key={item.key}
       data-entry-key={entryKey}
       data-recent={isRecent ? "true" : undefined}
-      onMouseEnter={() => onOpen(item, entryKey)}
-      onMouseMove={() => onMove(item, entryKey)}
-      onMouseLeave={() => onClose(entryKey)}
-      onContextMenu={(event) => onContextMenu(item, event, entryKey)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        cancelLongPressTimer();
+        onOpenMenu(item, entryKey);
+      }}
+      onKeyDown={handleKeyDown}
+      onPointerCancel={cancelLongPressTimer}
+      onPointerDown={handlePointerDown}
+      onPointerEnter={(event) => {
+        if (event.pointerType === "mouse") onOpen(item, entryKey);
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType === "mouse") onClose(entryKey);
+        else cancelLongPressTimer();
+      }}
+      onPointerMove={handlePointerMove}
+      onPointerUp={cancelLongPressTimer}
     >
       <Button
         ref={isActive ? triggerRef : undefined}
@@ -545,10 +639,16 @@ const EmojiButton = memo(function EmojiButton({
         aria-label={
           isCopying
             ? `正在准备复制 ${item.name}`
-            : `复制 ${item.name}，编号 ${item.id}`
+            : `复制 ${item.name}，编号 ${item.id}；长按打开更多操作`
         }
         variant="ghost"
-        onPress={() => onCopy(item, entryKey)}
+        onPress={() => {
+          if (longPressTriggeredRef.current) {
+            longPressTriggeredRef.current = false;
+            return;
+          }
+          onCopy(item, entryKey);
+        }}
       >
         <EmojiThumbnail item={item} />
         {isCopying ? (
@@ -834,13 +934,8 @@ export default function App() {
     }, 80);
   }, [cancelClose]);
 
-  const openContextMenu = useCallback(
-    (
-      item: DisplayEmoji,
-      event: ReactMouseEvent<HTMLDivElement>,
-      entryKey: string,
-    ) => {
-      event.preventDefault();
+  const openMoreMenu = useCallback(
+    (item: DisplayEmoji, entryKey: string) => {
       cancelClose();
       setOpenKey("");
       setPreviewMode(hasAnimatedPreview(item) ? "animated" : "static");
@@ -856,16 +951,15 @@ export default function App() {
     setMenuKey("");
   }
 
-  async function runAction(action: () => Promise<void>, successMessage: string) {
+  async function runClipboardAction(
+    action: () => Promise<void>,
+    successMessage: string,
+  ) {
     try {
       await action();
       showAppToast(successMessage, "success", 2200);
     } catch (reason) {
-      showAppToast(
-        reason instanceof Error ? reason.message : "操作失败",
-        "danger",
-        2800,
-      );
+      showAppToast(copyFailureMessage(reason), "danger", 3200);
     }
   }
 
@@ -926,11 +1020,7 @@ export default function App() {
           showAppToast(message, "success", 2200);
         })
         .catch((reason: unknown) => {
-          showAppToast(
-            reason instanceof Error ? reason.message : "复制失败",
-            "danger",
-            2800,
-          );
+          showAppToast(copyFailureMessage(reason), "danger", 3200);
         })
         .finally(() => {
           copyingKeyRef.current = "";
@@ -1107,7 +1197,7 @@ export default function App() {
                       isMenuOpen={false}
                       isCopying={copyingKey === renderKey}
                       onClose={closePreviewSoon}
-                      onContextMenu={openContextMenu}
+                      onOpenMenu={openMoreMenu}
                       onCopy={handleQuickCopy}
                       onMove={resumePreviewOnMove}
                       onOpen={openPreview}
@@ -1168,7 +1258,7 @@ export default function App() {
                     isMenuOpen={isMenuOpen}
                     isCopying={copyingKey === renderKey}
                     onClose={closePreviewSoon}
-                    onContextMenu={openContextMenu}
+                    onOpenMenu={openMoreMenu}
                     onCopy={handleQuickCopy}
                     onMove={resumePreviewOnMove}
                     onOpen={openPreview}
@@ -1311,7 +1401,7 @@ export default function App() {
                                     size="sm"
                                     variant="tertiary"
                                     onPress={() =>
-                                      runAction(
+                                      runClipboardAction(
                                         () =>
                                           copyAssetLink(preferredLinkAsset.path),
                                         "资源链接已复制",
