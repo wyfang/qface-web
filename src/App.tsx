@@ -25,6 +25,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -50,6 +51,7 @@ import {
   fetchPngBlob,
   openAsset,
 } from "./media";
+import type { ConversionProgress, DownloadProgress } from "./media";
 import {
   QQ_ASSET_TYPE,
   type CollectionName,
@@ -82,6 +84,30 @@ type PreparedGif = {
   generated: boolean;
 };
 type MediaLoadState = "loading" | "loaded" | "error";
+type PrepareProgress =
+  | {
+      phase: "preparing" | "clipboard";
+      label: string;
+    }
+  | {
+      phase: "download";
+      label: string;
+      progress: DownloadProgress;
+    }
+  | {
+      phase: "convert";
+      label: string;
+      progress: ConversionProgress;
+    };
+type CopyTaskState = {
+  entryKey: string;
+  title: string;
+  detail: string;
+  progress?: number;
+  status: "active" | "success" | "danger" | "cancelled";
+  showCancel: boolean;
+  exiting: boolean;
+};
 
 const SKIP_UNDERSCORE_PNG_IDS = new Set(["342", "466", "468", "469"]);
 const STATIC_PREVIEW_OVERRIDE_IDS = new Set(["466", "468", "469"]);
@@ -112,7 +138,10 @@ const RECENT_STORAGE_KEY = "qface-recent-emojis";
 const MAX_STORED_RECENT = 40;
 const MOBILE_LONG_PRESS_DELAY = 520;
 const MOBILE_LONG_PRESS_MOVE_TOLERANCE = 10;
+const MOBILE_LONG_PRESS_RELEASE_GUARD = 600;
 const TOAST_EXIT_DURATION = 200;
+const COPY_CANCEL_DELAY = 3000;
+const loadedThumbnailUrls = new Set<string>();
 const appToastQueue = new ToastQueue({
   maxVisibleToasts: 1,
   wrapUpdate: (update) => update(),
@@ -313,7 +342,14 @@ function pngPathsFor(item: DisplayEmoji): string[] {
   ];
 }
 
-async function prepareGif(item: DisplayEmoji): Promise<PreparedGif> {
+async function prepareGif(
+  item: DisplayEmoji,
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (progress: PrepareProgress) => void;
+  } = {},
+): Promise<PreparedGif> {
+  const { onProgress, signal } = options;
   let lastConversionError: unknown;
   const gifPaths = [
     ...item.assets
@@ -325,7 +361,12 @@ async function prepareGif(item: DisplayEmoji): Promise<PreparedGif> {
   ];
 
   for (const path of new Set(gifPaths)) {
-    const blob = await fetchGifBlob(path);
+    onProgress?.({ phase: "preparing", label: "正在查找 GIF" });
+    const blob = await fetchGifBlob(path, {
+      signal,
+      onDownloadProgress: (progress) =>
+        onProgress?.({ phase: "download", label: "下载 GIF", progress }),
+    });
     if (blob) return { blob, generated: false };
   }
 
@@ -335,26 +376,48 @@ async function prepareGif(item: DisplayEmoji): Promise<PreparedGif> {
   for (const asset of new Map(
     apngAssets.map((candidate) => [candidate.path, candidate]),
   ).values()) {
-    if (!(await fetchApngBlob(asset.path))) continue;
+    onProgress?.({ phase: "preparing", label: "正在查找 APNG" });
+    const apngBlob = await fetchApngBlob(asset.path, {
+      signal,
+      onDownloadProgress: (progress) =>
+        onProgress?.({ phase: "download", label: "下载 APNG", progress }),
+    });
+    if (!apngBlob) continue;
     try {
+      onProgress?.({ phase: "preparing", label: "正在解析动画" });
       return {
-        blob: await convertApngToGifBlob(asset),
+        blob: await convertApngToGifBlob(asset, apngBlob, {
+          signal,
+          onConversionProgress: (progress) =>
+            onProgress?.({ phase: "convert", label: "生成 GIF", progress }),
+        }),
         generated: true,
       };
     } catch (reason) {
+      if (isAbortError(reason)) throw reason;
       lastConversionError = reason;
     }
   }
 
   for (const path of new Set(pngPathsFor(item))) {
-    const blob = await fetchPngBlob(path);
+    onProgress?.({ phase: "preparing", label: "正在查找 PNG" });
+    const blob = await fetchPngBlob(path, {
+      signal,
+      onDownloadProgress: (progress) =>
+        onProgress?.({ phase: "download", label: "下载 PNG", progress }),
+    });
     if (!blob) continue;
     try {
       return {
-        blob: await convertPngToGifBlob(path, blob),
+        blob: await convertPngToGifBlob(path, blob, {
+          signal,
+          onConversionProgress: (progress) =>
+            onProgress?.({ phase: "convert", label: "生成 GIF", progress }),
+        }),
         generated: true,
       };
     } catch (reason) {
+      if (isAbortError(reason)) throw reason;
       lastConversionError = reason;
     }
   }
@@ -362,10 +425,15 @@ async function prepareGif(item: DisplayEmoji): Promise<PreparedGif> {
   if (item.fallbackText) {
     try {
       return {
-        blob: await convertTextToGifBlob(item.key, item.fallbackText),
+        blob: await convertTextToGifBlob(item.key, item.fallbackText, {
+          signal,
+          onConversionProgress: (progress) =>
+            onProgress?.({ phase: "convert", label: "生成 GIF", progress }),
+        }),
         generated: true,
       };
     } catch (reason) {
+      if (isAbortError(reason)) throw reason;
       lastConversionError = reason;
     }
   }
@@ -374,17 +442,38 @@ async function prepareGif(item: DisplayEmoji): Promise<PreparedGif> {
   throw new Error("当前表情没有可生成 GIF 的内容");
 }
 
+function isAbortError(reason: unknown): boolean {
+  return reason instanceof DOMException && reason.name === "AbortError";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function throwIfCopyAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("操作已取消", "AbortError");
+  }
+}
+
 function EmojiThumbnail({ item }: { item: DisplayEmoji }) {
   const src = item.staticPath ? assetUrl(item.staticPath) : "";
   const [loadRecord, setLoadRecord] = useState<{
     src: string;
     state: MediaLoadState;
-  }>(() => ({ src, state: src ? "loading" : "loaded" }));
+  }>(() => ({
+    src,
+    state: src && !loadedThumbnailUrls.has(src) ? "loading" : "loaded",
+  }));
   const loadState =
     loadRecord.src === src
       ? loadRecord.state
       : src
-        ? "loading"
+        ? loadedThumbnailUrls.has(src)
+          ? "loaded"
+          : "loading"
         : "loaded";
 
   if (!src) {
@@ -409,7 +498,10 @@ function EmojiThumbnail({ item }: { item: DisplayEmoji }) {
         loading="lazy"
         src={src}
         onError={() => setLoadRecord({ src, state: "error" })}
-        onLoad={() => setLoadRecord({ src, state: "loaded" })}
+        onLoad={() => {
+          loadedThumbnailUrls.add(src);
+          setLoadRecord({ src, state: "loaded" });
+        }}
       />
     </span>
   );
@@ -472,7 +564,7 @@ function PreviewMedia({
       data-load-state={loadState}
       aria-busy={loadState === "loading"}
     >
-      {hasRemoteMedia && loadState !== "loaded" ? (
+      {hasRemoteMedia && loadState === "error" ? (
         <span className="preview-image-placeholder" aria-hidden="true">
           <Smile size={38} strokeWidth={1.35} />
         </span>
@@ -506,16 +598,9 @@ function PreviewMedia({
       )}
 
       {loadState === "loading" ? (
-        <ProgressBar
-          isIndeterminate
-          aria-label="正在加载表情预览"
-          className="preview-loading-bar"
-          size="sm"
-        >
-          <ProgressBar.Track>
-            <ProgressBar.Fill />
-          </ProgressBar.Track>
-        </ProgressBar>
+        <span className="preview-loading-spinner" aria-label="正在加载表情预览">
+          <Spinner size="md" />
+        </span>
       ) : null}
     </div>
   );
@@ -527,12 +612,13 @@ const EmojiButton = memo(function EmojiButton({
   isRecent,
   isActive,
   isMenuOpen,
-  isCopying,
+  isCopySelected,
   onOpen,
   onMove,
   onClose,
   onCopy,
   onOpenMenu,
+  onLongPressRelease,
   triggerRef,
 }: {
   item: DisplayEmoji;
@@ -540,12 +626,17 @@ const EmojiButton = memo(function EmojiButton({
   isRecent: boolean;
   isActive: boolean;
   isMenuOpen: boolean;
-  isCopying: boolean;
+  isCopySelected: boolean;
   onOpen: (item: DisplayEmoji, entryKey: string) => void;
   onMove: (item: DisplayEmoji, entryKey: string) => void;
   onClose: (key: string) => void;
   onCopy: (item: DisplayEmoji, entryKey: string) => void;
-  onOpenMenu: (item: DisplayEmoji, entryKey: string) => void;
+  onOpenMenu: (
+    item: DisplayEmoji,
+    entryKey: string,
+    guardRelease?: boolean,
+  ) => void;
+  onLongPressRelease: (entryKey: string) => void;
   triggerRef: RefObject<HTMLButtonElement | null>;
 }) {
   const longPressTimerRef = useRef<number | null>(null);
@@ -567,7 +658,7 @@ const EmojiButton = memo(function EmojiButton({
       longPressTriggeredRef.current = false;
       return;
     }
-    if (event.button !== 0 || isCopying) return;
+    if (event.button !== 0) return;
     cancelLongPressTimer();
     longPressTriggeredRef.current = false;
     pointerStartRef.current = { x: event.clientX, y: event.clientY };
@@ -576,7 +667,7 @@ const EmojiButton = memo(function EmojiButton({
       pointerStartRef.current = null;
       longPressTriggeredRef.current = true;
       navigator.vibrate?.(10);
-      onOpenMenu(item, entryKey);
+      onOpenMenu(item, entryKey, true);
     }, MOBILE_LONG_PRESS_DELAY);
   };
 
@@ -607,18 +698,21 @@ const EmojiButton = memo(function EmojiButton({
   return (
     <div
       className="emoji-cell"
-      aria-busy={isCopying}
       data-emoji-key={item.key}
       data-entry-key={entryKey}
       data-recent={isRecent ? "true" : undefined}
       onContextMenu={(event) => {
         event.preventDefault();
         cancelLongPressTimer();
-        onOpenMenu(item, entryKey);
+        onOpenMenu(item, entryKey, true);
+        onLongPressRelease(entryKey);
       }}
       onKeyDown={handleKeyDown}
-      onPointerCancel={cancelLongPressTimer}
-      onPointerDown={handlePointerDown}
+      onPointerCancelCapture={() => {
+        cancelLongPressTimer();
+        if (longPressTriggeredRef.current) onLongPressRelease(entryKey);
+      }}
+      onPointerDownCapture={handlePointerDown}
       onPointerEnter={(event) => {
         if (event.pointerType === "mouse") onOpen(item, entryKey);
       }}
@@ -626,21 +720,20 @@ const EmojiButton = memo(function EmojiButton({
         if (event.pointerType === "mouse") onClose(entryKey);
         else cancelLongPressTimer();
       }}
-      onPointerMove={handlePointerMove}
-      onPointerUp={cancelLongPressTimer}
+      onPointerMoveCapture={handlePointerMove}
+      onPointerUpCapture={() => {
+        cancelLongPressTimer();
+        if (longPressTriggeredRef.current) onLongPressRelease(entryKey);
+      }}
     >
       <Button
         ref={isActive ? triggerRef : undefined}
         className="emoji-button"
+        data-copy-selected={isCopySelected ? "true" : undefined}
         isIconOnly
-        isPending={isCopying}
         aria-expanded={isMenuOpen}
         aria-haspopup="menu"
-        aria-label={
-          isCopying
-            ? `正在准备复制 ${item.name}`
-            : `复制 ${item.name}，编号 ${item.id}；长按打开更多操作`
-        }
+        aria-label={`复制 ${item.name}，编号 ${item.id}；长按打开更多操作`}
         variant="ghost"
         onPress={() => {
           if (longPressTriggeredRef.current) {
@@ -651,11 +744,6 @@ const EmojiButton = memo(function EmojiButton({
         }}
       >
         <EmojiThumbnail item={item} />
-        {isCopying ? (
-          <span className="emoji-copy-status" aria-hidden="true">
-            <Spinner color="current" size="sm" />
-          </span>
-        ) : null}
       </Button>
     </div>
   );
@@ -679,8 +767,16 @@ export default function App() {
   const [error, setError] = useState("");
   const [gifDownloadKey, setGifDownloadKey] = useState("");
   const [copyingKey, setCopyingKey] = useState("");
+  const [lastCopiedKey, setLastCopiedKey] = useState("");
+  const [copyTask, setCopyTask] = useState<CopyTaskState | null>(null);
   const closeTimer = useRef<number | null>(null);
   const copyingKeyRef = useRef("");
+  const copyControllerRef = useRef<AbortController | null>(null);
+  const copyCancelTimerRef = useRef<number | null>(null);
+  const copyDismissTimerRef = useRef<number | null>(null);
+  const copyExitTimerRef = useRef<number | null>(null);
+  const menuPressGuardRef = useRef("");
+  const menuPressGuardTimerRef = useRef<number | null>(null);
   const suppressHoverRef = useRef(false);
   const activeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const emojiGridRef = useRef<HTMLDivElement | null>(null);
@@ -734,6 +830,19 @@ export default function App() {
   useEffect(
     () => () => {
       if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+      if (copyCancelTimerRef.current !== null) {
+        window.clearTimeout(copyCancelTimerRef.current);
+      }
+      if (copyDismissTimerRef.current !== null) {
+        window.clearTimeout(copyDismissTimerRef.current);
+      }
+      if (copyExitTimerRef.current !== null) {
+        window.clearTimeout(copyExitTimerRef.current);
+      }
+      if (menuPressGuardTimerRef.current !== null) {
+        window.clearTimeout(menuPressGuardTimerRef.current);
+      }
+      copyControllerRef.current?.abort();
     },
     [],
   );
@@ -829,7 +938,7 @@ export default function App() {
     window.localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(recentKeys));
   }, [recentKeys]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const grid = emojiGridRef.current;
     if (!grid) return;
 
@@ -934,9 +1043,24 @@ export default function App() {
     }, 80);
   }, [cancelClose]);
 
+  const releaseLongPressGuard = useCallback((entryKey: string) => {
+    if (menuPressGuardTimerRef.current !== null) {
+      window.clearTimeout(menuPressGuardTimerRef.current);
+    }
+    menuPressGuardTimerRef.current = window.setTimeout(() => {
+      if (menuPressGuardRef.current === entryKey) {
+        menuPressGuardRef.current = "";
+      }
+      menuPressGuardTimerRef.current = null;
+    }, MOBILE_LONG_PRESS_RELEASE_GUARD);
+  }, []);
+
   const openMoreMenu = useCallback(
-    (item: DisplayEmoji, entryKey: string) => {
+    (item: DisplayEmoji, entryKey: string, guardRelease = false) => {
       cancelClose();
+      if (guardRelease) {
+        menuPressGuardRef.current = entryKey;
+      }
       setOpenKey("");
       setPreviewMode(hasAnimatedPreview(item) ? "animated" : "static");
       setMenuKey(entryKey);
@@ -963,40 +1087,140 @@ export default function App() {
     }
   }
 
-  const copyEmoji = useCallback(async (item: DisplayEmoji): Promise<string> => {
-    let lastCopyError: unknown;
-    try {
-      const preparedGif = await prepareGif(item);
-      await copyGifBlob(preparedGif.blob, item.name);
-      return preparedGif.generated ? "GIF 已生成并复制" : "GIF 复制成功";
-    } catch (reason) {
-      lastCopyError = reason;
+  const clearCopyTaskTimers = useCallback(() => {
+    if (copyCancelTimerRef.current !== null) {
+      window.clearTimeout(copyCancelTimerRef.current);
+      copyCancelTimerRef.current = null;
     }
+    if (copyDismissTimerRef.current !== null) {
+      window.clearTimeout(copyDismissTimerRef.current);
+      copyDismissTimerRef.current = null;
+    }
+    if (copyExitTimerRef.current !== null) {
+      window.clearTimeout(copyExitTimerRef.current);
+      copyExitTimerRef.current = null;
+    }
+  }, []);
 
-    const fallbackPngPaths = [
-      ...pngPathsFor(item),
-      ...item.assets
-        .filter((asset) => asset.type === QQ_ASSET_TYPE.APNG)
-        .map((asset) => asset.path),
-    ];
-    for (const path of new Set(fallbackPngPaths)) {
-      const fallbackPngBlob = await fetchPngBlob(path);
-      if (!fallbackPngBlob) continue;
+  const settleCopyTask = useCallback(
+    (
+      entryKey: string,
+      status: CopyTaskState["status"],
+      title: string,
+      timeout: number,
+    ) => {
+      if (copyCancelTimerRef.current !== null) {
+        window.clearTimeout(copyCancelTimerRef.current);
+        copyCancelTimerRef.current = null;
+      }
+      setCopyTask((current) =>
+        current?.entryKey === entryKey
+          ? {
+              ...current,
+              title,
+              detail: "",
+              progress: undefined,
+              status,
+              showCancel: false,
+            }
+          : current,
+      );
+      copyDismissTimerRef.current = window.setTimeout(() => {
+        setCopyTask((current) =>
+          current?.entryKey === entryKey
+            ? { ...current, exiting: true }
+            : current,
+        );
+        copyExitTimerRef.current = window.setTimeout(() => {
+          setCopyTask((current) =>
+            current?.entryKey === entryKey ? null : current,
+          );
+          copyExitTimerRef.current = null;
+        }, TOAST_EXIT_DURATION);
+        copyDismissTimerRef.current = null;
+      }, timeout);
+    },
+    [],
+  );
+
+  const cancelCopyTask = useCallback(() => {
+    const controller = copyControllerRef.current;
+    if (!controller || controller.signal.aborted) return;
+    if (copyCancelTimerRef.current !== null) {
+      window.clearTimeout(copyCancelTimerRef.current);
+      copyCancelTimerRef.current = null;
+    }
+    setCopyTask((current) =>
+      current?.status === "active"
+        ? {
+            ...current,
+            detail: "正在取消…",
+            progress: undefined,
+            showCancel: false,
+          }
+        : current,
+    );
+    controller.abort();
+  }, []);
+
+  const copyEmoji = useCallback(
+    async (
+      item: DisplayEmoji,
+      options: {
+        signal?: AbortSignal;
+        onProgress?: (progress: PrepareProgress) => void;
+      } = {},
+    ): Promise<string> => {
+      const { onProgress, signal } = options;
+      let lastCopyError: unknown;
       try {
-        await copyPngBlob(fallbackPngBlob);
-        return "GIF 无法复制，已改为静态 PNG";
+        const preparedGif = await prepareGif(item, options);
+        throwIfCopyAborted(signal);
+        onProgress?.({ phase: "clipboard", label: "正在写入剪贴板" });
+        await copyGifBlob(preparedGif.blob, item.name, signal);
+        return preparedGif.generated ? "GIF 已生成并复制" : "GIF 复制成功";
       } catch (reason) {
+        if (isAbortError(reason)) throw reason;
         lastCopyError = reason;
       }
-    }
 
-    if (item.fallbackText) {
-      await navigator.clipboard.writeText(item.fallbackText);
-      return "文本已复制";
-    }
-    if (lastCopyError) throw lastCopyError;
-    throw new Error("当前表情没有可复制的内容");
-  }, []);
+      const fallbackPngPaths = [
+        ...pngPathsFor(item),
+        ...item.assets
+          .filter((asset) => asset.type === QQ_ASSET_TYPE.APNG)
+          .map((asset) => asset.path),
+      ];
+      for (const path of new Set(fallbackPngPaths)) {
+        onProgress?.({ phase: "preparing", label: "正在准备静态图片" });
+        const fallbackPngBlob = await fetchPngBlob(path, {
+          signal,
+          onDownloadProgress: (progress) =>
+            onProgress?.({ phase: "download", label: "下载 PNG", progress }),
+        });
+        if (!fallbackPngBlob) continue;
+        try {
+          throwIfCopyAborted(signal);
+          onProgress?.({ phase: "clipboard", label: "正在写入剪贴板" });
+          await copyPngBlob(fallbackPngBlob, signal);
+          return "GIF 无法复制，已改为静态 PNG";
+        } catch (reason) {
+          if (isAbortError(reason)) throw reason;
+          lastCopyError = reason;
+        }
+      }
+
+      if (item.fallbackText) {
+        throwIfCopyAborted(signal);
+        onProgress?.({ phase: "clipboard", label: "正在写入剪贴板" });
+        await navigator.clipboard.writeText(item.fallbackText);
+        throwIfCopyAborted(signal);
+        return "文本已复制";
+      }
+      if (lastCopyError) throw lastCopyError;
+      throw new Error("当前表情没有可复制的内容");
+    },
+    [],
+  );
 
   const rememberRecent = useCallback((item: DisplayEmoji) => {
     setRecentKeys((current) => [
@@ -1008,26 +1232,119 @@ export default function App() {
   const handleQuickCopy = useCallback(
     (item: DisplayEmoji, entryKey: string) => {
       if (copyingKeyRef.current) return;
+      clearCopyTaskTimers();
+      const controller = new AbortController();
+      copyControllerRef.current = controller;
       copyingKeyRef.current = entryKey;
       setCopyingKey(entryKey);
+      setCopyTask({
+        entryKey,
+        title: `正在复制「${item.name}」`,
+        detail: "正在查找可复制资源",
+        status: "active",
+        showCancel: false,
+        exiting: false,
+      });
+      copyCancelTimerRef.current = window.setTimeout(() => {
+        setCopyTask((current) =>
+          current?.entryKey === entryKey && current.status === "active"
+            ? { ...current, showCancel: true }
+            : current,
+        );
+        copyCancelTimerRef.current = null;
+      }, COPY_CANCEL_DELAY);
 
-      void copyEmoji(item)
+      const updateProgress = (nextProgress: PrepareProgress) => {
+        if (
+          copyControllerRef.current !== controller ||
+          controller.signal.aborted
+        ) {
+          return;
+        }
+        if (
+          nextProgress.phase === "clipboard" &&
+          copyCancelTimerRef.current !== null
+        ) {
+          window.clearTimeout(copyCancelTimerRef.current);
+          copyCancelTimerRef.current = null;
+        }
+        setCopyTask((current) => {
+          if (current?.entryKey !== entryKey || current.status !== "active") {
+            return current;
+          }
+          if (nextProgress.phase === "download") {
+            const { loaded, total } = nextProgress.progress;
+            return {
+              ...current,
+              detail: total
+                ? `${nextProgress.label} · ${formatBytes(loaded)} / ${formatBytes(total)}`
+                : `${nextProgress.label} · 已下载 ${formatBytes(loaded)}`,
+              progress: total
+                ? Math.min(100, Math.max(0, (loaded / total) * 100))
+                : undefined,
+            };
+          }
+          if (nextProgress.phase === "convert") {
+            const { completed, total } = nextProgress.progress;
+            return {
+              ...current,
+              detail: `${nextProgress.label} · ${completed} / ${total} 帧`,
+              progress: total
+                ? Math.min(100, Math.max(0, (completed / total) * 100))
+                : undefined,
+            };
+          }
+          return {
+            ...current,
+            detail: nextProgress.label,
+            progress: undefined,
+            showCancel:
+              nextProgress.phase === "clipboard" ? false : current.showCancel,
+          };
+        });
+      };
+
+      void copyEmoji(item, {
+        signal: controller.signal,
+        onProgress: updateProgress,
+      })
         .then((message) => {
           suppressHoverRef.current = true;
           setOpenKey("");
           setMenuKey("");
+          setLastCopiedKey(entryKey);
           rememberRecent(item);
-          showAppToast(message, "success", 2200);
+          settleCopyTask(entryKey, "success", message, 1800);
         })
         .catch((reason: unknown) => {
-          showAppToast(copyFailureMessage(reason), "danger", 3200);
+          if (isAbortError(reason)) {
+            settleCopyTask(entryKey, "cancelled", "已取消复制", 1200);
+            return;
+          }
+          settleCopyTask(
+            entryKey,
+            "danger",
+            copyFailureMessage(reason),
+            2800,
+          );
         })
         .finally(() => {
+          if (copyControllerRef.current === controller) {
+            copyControllerRef.current = null;
+          }
           copyingKeyRef.current = "";
           setCopyingKey("");
         });
     },
-    [copyEmoji, rememberRecent],
+    [clearCopyTaskTimers, copyEmoji, rememberRecent, settleCopyTask],
+  );
+
+  const handleGridCopy = useCallback(
+    (item: DisplayEmoji, entryKey: string) => {
+      if (menuPressGuardRef.current === entryKey) return;
+      handleQuickCopy(item, entryKey);
+    },
+    [handleQuickCopy],
   );
 
   async function handleDownloadGif(item: DisplayEmoji) {
@@ -1059,8 +1376,57 @@ export default function App() {
         maxVisibleToasts={1}
         placement="bottom"
         queue={appToastQueue}
-        width="min(260px, calc(100vw - 32px))"
+        width={264}
       />
+      {copyTask ? (
+        <aside
+          aria-live="polite"
+          className="copy-task-toast"
+          data-exiting={copyTask.exiting ? "true" : undefined}
+          data-status={copyTask.status}
+          role="status"
+        >
+          <div className="copy-task-toast__row">
+            {copyTask.status === "active" ? (
+              <Spinner color="current" size="sm" />
+            ) : (
+              <span className="copy-task-toast__mark" aria-hidden="true">
+                {copyTask.status === "success"
+                  ? "✓"
+                  : copyTask.status === "danger"
+                    ? "!"
+                    : "×"}
+              </span>
+            )}
+            <div className="copy-task-toast__content">
+              <strong>{copyTask.title}</strong>
+              {copyTask.detail ? <span>{copyTask.detail}</span> : null}
+            </div>
+            {copyTask.status === "active" && copyTask.showCancel ? (
+              <Button
+                className="copy-task-toast__cancel"
+                size="sm"
+                variant="tertiary"
+                onPress={cancelCopyTask}
+              >
+                取消
+              </Button>
+            ) : null}
+          </div>
+          {copyTask.status === "active" && copyTask.progress !== undefined ? (
+            <ProgressBar
+              aria-label="复制进度"
+              className="copy-task-toast__progress"
+              size="sm"
+              value={copyTask.progress}
+            >
+              <ProgressBar.Track>
+                <ProgressBar.Fill />
+              </ProgressBar.Track>
+            </ProgressBar>
+          ) : null}
+        </aside>
+      ) : null}
       <section className="emoji-panel" aria-label="表情选择器">
         <nav className="toolbar" aria-label="表情浏览">
           <div className="collection-switcher" aria-label="表情来源">
@@ -1185,6 +1551,9 @@ export default function App() {
               const isPreviewOpen = openKey === renderKey;
               const isMenuOpen = menuKey === renderKey;
               const isActive = isPreviewOpen || isMenuOpen;
+              const isCopySelected = copyingKey
+                ? copyingKey === renderKey
+                : lastCopiedKey === renderKey;
 
               if (!isActive) {
                 return (
@@ -1195,10 +1564,11 @@ export default function App() {
                       isRecent={isRecent}
                       isActive={false}
                       isMenuOpen={false}
-                      isCopying={copyingKey === renderKey}
+                      isCopySelected={isCopySelected}
                       onClose={closePreviewSoon}
+                      onLongPressRelease={releaseLongPressGuard}
                       onOpenMenu={openMoreMenu}
-                      onCopy={handleQuickCopy}
+                      onCopy={handleGridCopy}
                       onMove={resumePreviewOnMove}
                       onOpen={openPreview}
                       triggerRef={activeTriggerRef}
@@ -1256,10 +1626,11 @@ export default function App() {
                     isRecent={isRecent}
                     isActive
                     isMenuOpen={isMenuOpen}
-                    isCopying={copyingKey === renderKey}
+                    isCopySelected={isCopySelected}
                     onClose={closePreviewSoon}
+                    onLongPressRelease={releaseLongPressGuard}
                     onOpenMenu={openMoreMenu}
-                    onCopy={handleQuickCopy}
+                    onCopy={handleGridCopy}
                     onMove={resumePreviewOnMove}
                     onOpen={openPreview}
                     triggerRef={activeTriggerRef}
@@ -1275,29 +1646,20 @@ export default function App() {
                       isOpen
                       isNonModal
                       placement="top"
-                      offset={7}
+                      offset={5}
                       shouldFlip
                       triggerRef={activeTriggerRef}
                       onOpenChange={(nextOpen) => {
-                        if (!nextOpen && isMenuOpen) setMenuKey("");
+                        if (
+                          !nextOpen &&
+                          isMenuOpen &&
+                          menuPressGuardRef.current !== renderKey
+                        ) {
+                          setMenuKey("");
+                        }
                       }}
                     >
                       <Popover.Dialog aria-label={`${item.name} 预览`}>
-                        <Popover.Arrow>
-                          <svg
-                            aria-hidden="true"
-                            height="12"
-                            viewBox="0 0 12 12"
-                            width="12"
-                            xmlns="http://www.w3.org/2000/svg"
-                          >
-                            <path d="M0 0C5.48483 8 6.5 8 12 0Z" />
-                            <path
-                              className="popover-arrow-outline"
-                              d="M0 0C5.48483 8 6.5 8 12 0"
-                            />
-                          </svg>
-                        </Popover.Arrow>
                         <PreviewMedia
                           item={item}
                           lottieSrc={
