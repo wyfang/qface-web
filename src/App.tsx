@@ -69,13 +69,8 @@ type EmojiGridItemEntry = {
   isRecent: boolean;
   renderKey: string;
 };
-type EmojiGridPlaceholderEntry = {
-  kind: "recent-placeholder";
-  renderKey: string;
-};
 type EmojiGridEntry =
   | EmojiGridItemEntry
-  | EmojiGridPlaceholderEntry
   | "recent-label"
   | "recent-divider"
   | "lottie-label"
@@ -793,6 +788,10 @@ export default function App() {
   const activeTriggerRef = useRef<HTMLButtonElement | null>(null);
   const emojiScrollRef = useRef<HTMLDivElement | null>(null);
   const emojiGridRef = useRef<HTMLDivElement | null>(null);
+  const recentScrollAnchorRef = useRef<{
+    entryKey: string;
+    contentTop: number;
+  } | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -924,21 +923,13 @@ export default function App() {
   const gridEntries = useMemo<EmojiGridEntry[]>(
     () => {
       const entries: EmojiGridEntry[] = [];
-      if (!query.trim()) {
-        const placeholderCount = Math.max(
-          0,
-          recentLimit - visibleRecentItems.length,
-        );
+      if (visibleRecentItems.length) {
         entries.push(
           "recent-label",
           ...visibleRecentItems.map((item) => ({
             item,
             isRecent: true,
             renderKey: `recent-${item.key}`,
-          })),
-          ...Array.from({ length: placeholderCount }, (_, index) => ({
-            kind: "recent-placeholder" as const,
-            renderKey: `recent-placeholder-${index}`,
           })),
           "recent-divider",
         );
@@ -950,7 +941,7 @@ export default function App() {
       }
       return entries;
     },
-    [listEntries, lottieEntries, query, recentLimit, visibleRecentItems],
+    [listEntries, lottieEntries, visibleRecentItems],
   );
 
   useEffect(() => {
@@ -958,8 +949,29 @@ export default function App() {
   }, [recentKeys]);
 
   useLayoutEffect(() => {
+    recentScrollAnchorRef.current = null;
     emojiScrollRef.current?.scrollTo({ top: 0, behavior: "instant" });
   }, [collection, query]);
+
+  useLayoutEffect(() => {
+    const anchor = recentScrollAnchorRef.current;
+    recentScrollAnchorRef.current = null;
+    const scroll = emojiScrollRef.current;
+    const firstItem = scroll?.querySelector<HTMLElement>(
+      '[data-entry-key^="list-"]',
+    );
+    if (!anchor || !scroll || firstItem?.dataset.entryKey !== anchor.entryKey) {
+      return;
+    }
+
+    // Keep the ordinary list still when recent rows are inserted above it.
+    // Use content coordinates so scrolling during an async copy is preserved.
+    const contentTop =
+      firstItem.getBoundingClientRect().top - scroll.getBoundingClientRect().top
+      + scroll.scrollTop;
+    const delta = contentTop - anchor.contentTop;
+    if (Math.abs(delta) > 0.5) scroll.scrollTop += delta;
+  }, [recentKeys]);
 
   useLayoutEffect(() => {
     const grid = emojiGridRef.current;
@@ -1277,6 +1289,21 @@ export default function App() {
   );
 
   const rememberRecent = useCallback((item: DisplayEmoji) => {
+    const scroll = emojiScrollRef.current;
+    const firstItem = scroll?.querySelector<HTMLElement>(
+      '[data-entry-key^="list-"]',
+    );
+    // Capture only immediately before the successful copy updates the list,
+    // never at pointer-down (the user may scroll while assets are downloading).
+    recentScrollAnchorRef.current =
+      scroll && firstItem?.dataset.entryKey
+        ? {
+            entryKey: firstItem.dataset.entryKey,
+            contentTop:
+              firstItem.getBoundingClientRect().top
+              - scroll.getBoundingClientRect().top + scroll.scrollTop,
+          }
+        : null;
     setRecentKeys((current) => [
       item.key,
       ...current.filter((key) => key !== item.key),
@@ -1599,15 +1626,6 @@ export default function App() {
               }
               if (entry === "lottie-divider") {
                 return <div className="lottie-divider" key={entry} />;
-              }
-              if ("kind" in entry) {
-                return (
-                  <div
-                    aria-hidden="true"
-                    className="recent-placeholder"
-                    key={entry.renderKey}
-                  />
-                );
               }
               const { item, isRecent, renderKey } = entry;
               const isPreviewOpen = openKey === renderKey;

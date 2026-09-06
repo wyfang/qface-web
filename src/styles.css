@@ -34,6 +34,8 @@
   --app-motion-slow: 260ms;
   --app-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --app-motion-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --app-shell-gap: 24px;
+  --app-toolbar-bottom: calc(var(--app-shell-gap) + 16px + env(safe-area-inset-bottom));
 }
 
 :root.dark {
@@ -94,7 +96,7 @@ button {
   height: 100vh;
   height: 100dvh;
   margin: 0 auto;
-  padding: 24px 0 12px;
+  padding: var(--app-shell-gap) 0;
 }
 
 .emoji-panel {
@@ -116,11 +118,11 @@ button {
 .toolbar {
   position: fixed;
   z-index: 80;
-  bottom: calc(14px + env(safe-area-inset-bottom));
+  bottom: var(--app-toolbar-bottom);
   left: 50%;
   display: flex;
   width: fit-content;
-  max-width: calc(100vw - 24px);
+  max-width: min(748px, calc(100vw - 60px));
   align-items: center;
   justify-content: center;
   gap: 6px;
@@ -305,6 +307,7 @@ button {
   height: 100%;
   overflow-y: auto;
   overscroll-behavior-y: contain;
+  overflow-anchor: none;
   scrollbar-width: none;
   padding-bottom: calc(126px + env(safe-area-inset-bottom));
   scroll-padding-block: 12px calc(126px + env(safe-area-inset-bottom));
@@ -361,8 +364,7 @@ button {
   background: var(--app-border);
 }
 
-.emoji-cell,
-.recent-placeholder {
+.emoji-cell {
   width: 100%;
   max-width: 44px;
   height: 44px;
@@ -371,11 +373,6 @@ button {
 
 .emoji-cell[data-recent="true"] {
   animation: app-control-enter var(--app-motion-base) var(--app-motion-ease) both;
-}
-
-.recent-placeholder {
-  visibility: hidden;
-  pointer-events: none;
 }
 
 .emoji-button.button {
@@ -869,7 +866,7 @@ button {
 
 .app-toast-region {
   z-index: 120 !important;
-  bottom: calc(84px + env(safe-area-inset-bottom)) !important;
+  bottom: calc(var(--app-toolbar-bottom) + 70px) !important;
   width: min(264px, calc(100vw - 32px)) !important;
   min-width: 0 !important;
 }
@@ -900,7 +897,7 @@ button {
 .copy-task-toast {
   position: fixed;
   z-index: 121;
-  bottom: calc(84px + env(safe-area-inset-bottom));
+  bottom: calc(var(--app-toolbar-bottom) + 70px);
   left: 50%;
   width: min(264px, calc(100vw - 32px));
   min-height: 48px;
@@ -1107,9 +1104,12 @@ button {
 }
 
 @media (max-width: 560px) {
+  :root {
+    --app-shell-gap: 8px;
+  }
+
   .app-shell {
     width: calc(100% - 16px);
-    padding: 8px 0;
   }
 
   .emoji-panel {
@@ -1119,9 +1119,8 @@ button {
   }
 
   .toolbar {
-    bottom: calc(10px + env(safe-area-inset-bottom));
     width: fit-content;
-    max-width: calc(100vw - 20px);
+    max-width: calc(100vw - 48px);
     border-radius: 21px;
   }
 
@@ -1132,7 +1131,6 @@ button {
   }
 
   .emoji-cell,
-  .recent-placeholder,
   .emoji-button.button {
     width: 100%;
     min-width: 0;
