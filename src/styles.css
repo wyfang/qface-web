@@ -72,6 +72,7 @@ html {
 body {
   min-width: 320px;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   background: var(--app-page);
   transition:
@@ -90,11 +91,17 @@ button {
 
 .app-shell {
   width: min(780px, calc(100% - 28px));
+  height: 100vh;
+  height: 100dvh;
   margin: 0 auto;
-  padding: 24px 0 calc(108px + env(safe-area-inset-bottom));
+  padding: 24px 0 12px;
 }
 
 .emoji-panel {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--app-border);
   border-radius: 16px;
@@ -275,9 +282,44 @@ button {
   background: transparent;
 }
 
+/* The mask stays on the viewport while its child scrolls. No per-frame JS or
+   inherited style variables are needed, and the panel border stays unmasked. */
+.emoji-viewport {
+  min-height: 0;
+  flex: 1;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - 126px - env(safe-area-inset-bottom)),
+    transparent calc(100% - 12px - env(safe-area-inset-bottom))
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0,
+    #000 calc(100% - 126px - env(safe-area-inset-bottom)),
+    transparent calc(100% - 12px - env(safe-area-inset-bottom))
+  );
+}
+
+.emoji-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: none;
+  padding-bottom: calc(126px + env(safe-area-inset-bottom));
+  scroll-padding-block: 12px calc(126px + env(safe-area-inset-bottom));
+}
+
+.emoji-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.emoji-scroll:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: -3px;
+}
+
 .emoji-grid {
-  --emoji-fade-start: calc(100% - 138px);
-  --emoji-fade-end: calc(100% - 24px);
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
   justify-content: stretch;
@@ -285,18 +327,6 @@ button {
   gap: 4px;
   min-height: 132px;
   padding: 12px;
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 var(--emoji-fade-start),
-    transparent var(--emoji-fade-end)
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    #000 0,
-    #000 var(--emoji-fade-start),
-    transparent var(--emoji-fade-end)
-  );
   animation: app-content-enter var(--app-motion-slow) var(--app-motion-ease) both;
 }
 
@@ -406,20 +436,17 @@ button {
   width: 34px;
   height: 34px;
   opacity: 0;
-  filter: blur(2px);
   transform: scale(0.88);
   object-fit: contain;
   pointer-events: none;
   user-select: none;
   transition:
     opacity var(--app-motion-base) var(--app-motion-ease),
-    filter var(--app-motion-base) var(--app-motion-ease),
     transform var(--app-motion-base) var(--app-motion-ease);
 }
 
 .emoji-thumbnail[data-load-state="loaded"] img {
   opacity: 1;
-  filter: blur(0);
   transform: scale(1);
 }
 
@@ -1082,12 +1109,10 @@ button {
 @media (max-width: 560px) {
   .app-shell {
     width: calc(100% - 16px);
-    padding: 8px 0 calc(104px + env(safe-area-inset-bottom));
+    padding: 8px 0;
   }
 
   .emoji-panel {
-    min-height: calc(100vh - 16px);
-    min-height: calc(100svh - 16px);
     border: 1px solid var(--app-border);
     border-radius: 14px;
     box-shadow: 0 8px 28px var(--app-panel-shadow);

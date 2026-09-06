@@ -791,6 +791,7 @@ export default function App() {
   const menuCloseTimerRef = useRef<number | null>(null);
   const suppressHoverRef = useRef(false);
   const activeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const emojiScrollRef = useRef<HTMLDivElement | null>(null);
   const emojiGridRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -957,11 +958,14 @@ export default function App() {
   }, [recentKeys]);
 
   useLayoutEffect(() => {
+    emojiScrollRef.current?.scrollTo({ top: 0, behavior: "instant" });
+  }, [collection, query]);
+
+  useLayoutEffect(() => {
     const grid = emojiGridRef.current;
     if (!grid) return;
 
-    let fadeFrame = 0;
-
+    let previousWidth = 0;
     const updateRecentLimit = () => {
       const columnCount = getComputedStyle(grid).gridTemplateColumns
         .split(" ")
@@ -969,37 +973,15 @@ export default function App() {
       setRecentLimit(Math.max(2, columnCount * 2));
     };
 
-    const updateFadeMask = () => {
-      const gridTop = grid.getBoundingClientRect().top;
-      const fadeStart = Math.max(0, window.innerHeight - 138 - gridTop);
-      const fadeEnd = Math.max(fadeStart, window.innerHeight - 24 - gridTop);
-      grid.style.setProperty("--emoji-fade-start", `${Math.round(fadeStart)}px`);
-      grid.style.setProperty("--emoji-fade-end", `${Math.round(fadeEnd)}px`);
-    };
-
-    const scheduleFadeMaskUpdate = () => {
-      if (fadeFrame) return;
-      fadeFrame = window.requestAnimationFrame(() => {
-        fadeFrame = 0;
-        updateFadeMask();
-      });
-    };
-
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry || !grid.classList.contains("emoji-grid")) return;
+      if (entry.contentRect.width === previousWidth) return;
+      previousWidth = entry.contentRect.width;
       updateRecentLimit();
-      scheduleFadeMaskUpdate();
     });
     updateRecentLimit();
-    updateFadeMask();
     observer.observe(grid);
-    window.addEventListener("scroll", scheduleFadeMaskUpdate, { passive: true });
-    window.addEventListener("resize", scheduleFadeMaskUpdate);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("scroll", scheduleFadeMaskUpdate);
-      window.removeEventListener("resize", scheduleFadeMaskUpdate);
-      if (fadeFrame) window.cancelAnimationFrame(fadeFrame);
-    };
+    return () => observer.disconnect();
   }, [error, loading]);
 
   useEffect(() => {
@@ -1575,6 +1557,14 @@ export default function App() {
           </div>
         </nav>
 
+        <div className="emoji-viewport">
+        <div
+          className="emoji-scroll"
+          ref={emojiScrollRef}
+          role="region"
+          aria-label="表情列表"
+          tabIndex={0}
+        >
         {loading ? (
           <div className="state-view" aria-label="正在载入表情">
             <Spinner size="lg" />
@@ -1929,6 +1919,8 @@ export default function App() {
         ) : (
           <div className="empty-view">没有匹配的表情</div>
         )}
+        </div>
+        </div>
       </section>
     </main>
   );
