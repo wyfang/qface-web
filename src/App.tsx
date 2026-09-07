@@ -50,6 +50,7 @@ import {
   fetchApngBlob,
   fetchGifBlob,
   fetchPngBlob,
+  normalizeGifBlob,
   openAsset,
 } from "./media";
 import type { ConversionProgress, DownloadProgress } from "./media";
@@ -358,16 +359,8 @@ async function prepareGif(
       : []),
   ];
 
-  for (const path of new Set(gifPaths)) {
-    onProgress?.({ phase: "preparing", label: "正在查找 GIF" });
-    const blob = await fetchGifBlob(path, {
-      signal,
-      onDownloadProgress: (progress) =>
-        onProgress?.({ phase: "download", label: "下载 GIF", progress }),
-    });
-    if (blob) return { blob, generated: false };
-  }
-
+  // The APNG collection contains higher-resolution, fuller animations than
+  // the legacy 56px GIFs. Prefer it before normalizing a legacy GIF.
   const apngAssets = item.assets.filter(
     (asset) => asset.type === QQ_ASSET_TYPE.APNG,
   );
@@ -381,20 +374,34 @@ async function prepareGif(
         onProgress?.({ phase: "download", label: "下载 APNG", progress }),
     });
     if (!apngBlob) continue;
-    try {
-      onProgress?.({ phase: "preparing", label: "正在解析动画" });
-      return {
-        blob: await convertApngToGifBlob(asset, apngBlob, {
-          signal,
-          onConversionProgress: (progress) =>
-            onProgress?.({ phase: "convert", label: "生成 GIF", progress }),
-        }),
-        generated: true,
-      };
-    } catch (reason) {
-      if (isAbortError(reason)) throw reason;
-      lastConversionError = reason;
-    }
+    // A valid animation must not silently become static after an encoding error.
+    onProgress?.({ phase: "preparing", label: "正在解析动画" });
+    return {
+      blob: await convertApngToGifBlob(asset, apngBlob, {
+        signal,
+        onConversionProgress: (progress) =>
+          onProgress?.({ phase: "convert", label: "生成 GIF", progress }),
+      }),
+      generated: true,
+    };
+  }
+
+  for (const path of new Set(gifPaths)) {
+    onProgress?.({ phase: "preparing", label: "正在查找 GIF" });
+    const blob = await fetchGifBlob(path, {
+      signal,
+      onDownloadProgress: (progress) =>
+        onProgress?.({ phase: "download", label: "下载 GIF", progress }),
+    });
+    if (!blob) continue;
+    return {
+      blob: await normalizeGifBlob(path, blob, {
+        signal,
+        onConversionProgress: (progress) =>
+          onProgress?.({ phase: "convert", label: "调整 GIF 规格", progress }),
+      }),
+      generated: false,
+    };
   }
 
   for (const path of new Set(pngPathsFor(item))) {
@@ -523,6 +530,7 @@ function copyFailureMessage(reason: unknown): string {
   }
 
   if (errorMessage === "当前表情没有可复制的内容") return errorMessage;
+  if (errorName === "GifConversionError") return errorMessage;
   return "复制失败，请稍后重试";
 }
 
@@ -1239,8 +1247,9 @@ export default function App() {
     ): Promise<string> => {
       const { onProgress, signal } = options;
       let lastCopyError: unknown;
+      // PNG fallback is only for clipboard limitations, not failed conversion.
+      const preparedGif = await prepareGif(item, options);
       try {
-        const preparedGif = await prepareGif(item, options);
         throwIfCopyAborted(signal);
         onProgress?.({ phase: "clipboard", label: "正在写入剪贴板" });
         await copyGifBlob(preparedGif.blob, item.name, signal);
@@ -1366,10 +1375,10 @@ export default function App() {
             };
           }
           if (nextProgress.phase === "convert") {
-            const { completed, total } = nextProgress.progress;
+            const { completed, total, stage } = nextProgress.progress;
             return {
               ...current,
-              detail: `${nextProgress.label} · ${completed} / ${total} 帧`,
+              detail: `${stage || nextProgress.label} · ${completed} / ${total} 帧`,
               progress: total
                 ? Math.min(100, Math.max(0, (completed / total) * 100))
                 : undefined,

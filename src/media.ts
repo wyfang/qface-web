@@ -1,6 +1,9 @@
 import type { QqAsset } from "./types";
+import { convertInWorker } from "./gifWorkerClient";
 
 const generatedGifCache = new Map<string, Blob>();
+const GIF_CACHE_BUDGET = 32 * 1024 * 1024;
+let generatedGifCacheBytes = 0;
 
 export type DownloadProgress = {
   loaded: number;
@@ -10,6 +13,7 @@ export type DownloadProgress = {
 export type ConversionProgress = {
   completed: number;
   total: number;
+  stage?: string;
 };
 
 export type MediaTaskOptions = {
@@ -31,10 +35,25 @@ async function cacheGeneratedGif(
   factory: () => Promise<Blob>,
 ): Promise<Blob> {
   const cached = generatedGifCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    generatedGifCache.delete(key);
+    generatedGifCache.set(key, cached);
+    return cached;
+  }
 
   const blob = await factory();
+  // Bound the memory used by the larger 499px animations with an LRU budget.
+  const previous = generatedGifCache.get(key);
+  if (previous) generatedGifCacheBytes -= previous.size;
+  generatedGifCache.delete(key);
+  while (generatedGifCacheBytes + blob.size > GIF_CACHE_BUDGET) {
+    const oldestKey = generatedGifCache.keys().next().value;
+    if (!oldestKey) break;
+    generatedGifCacheBytes -= generatedGifCache.get(oldestKey)!.size;
+    generatedGifCache.delete(oldestKey);
+  }
   generatedGifCache.set(key, blob);
+  generatedGifCacheBytes += blob.size;
   return blob;
 }
 
@@ -292,194 +311,84 @@ export function downloadBlob(blob: Blob, fileName: string): void {
   URL.revokeObjectURL(url);
 }
 
-function gifBytesToBlob(gifBytes: Uint8Array): Blob {
-  const gifBuffer = gifBytes.buffer.slice(
-    gifBytes.byteOffset,
-    gifBytes.byteOffset + gifBytes.byteLength,
-  ) as ArrayBuffer;
-  return new Blob([gifBuffer], { type: "image/gif" });
-}
-
-async function yieldToBrowser(): Promise<void> {
-  await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-}
-
-async function encodeApngToGifBlob(
-  asset: QqAsset,
-  sourceBlob: Blob | undefined,
-  options: MediaTaskOptions,
-): Promise<Blob> {
-  const { onConversionProgress, signal } = options;
-  throwIfAborted(signal);
-  const [apngModule, { GIFEncoder, quantize, applyPalette }] =
-    await Promise.all([import("apng-js"), import("gifenc")]);
-  throwIfAborted(signal);
-  const defaultExport = apngModule.default as unknown;
-  const parseAPNG =
-    typeof defaultExport === "function"
-      ? defaultExport
-      : (defaultExport as { default?: unknown })?.default;
-  if (typeof parseAPNG !== "function") {
-    throw new Error("无法加载 APNG 解析器");
-  }
-  let apngBlob = sourceBlob;
-  if (!apngBlob) {
-    apngBlob = await fetchApngBlob(asset.path, options) || undefined;
-  }
-  if (!apngBlob) {
-    throw new Error("APNG 读取失败");
-  }
-
-  const apng = parseAPNG(await apngBlob.arrayBuffer()) as ReturnType<
-    typeof apngModule.default
-  >;
-  throwIfAborted(signal);
-  if (apng instanceof Error) {
-    throw apng;
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = apng.width;
-  canvas.height = apng.height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) {
-    throw new Error("无法初始化 Canvas");
-  }
-
-  const player = await apng.getPlayer(context, false);
-  throwIfAborted(signal);
-  const gif = GIFEncoder();
-  onConversionProgress?.({ completed: 0, total: apng.frames.length });
-
-  for (let index = 0; index < apng.frames.length; index += 1) {
-    throwIfAborted(signal);
-    if (index > 0) {
-      player.renderNextFrame();
-    }
-
-    const frame = apng.frames[index];
-    const imageData = context.getImageData(0, 0, apng.width, apng.height);
-    const rgba = new Uint8Array(imageData.data);
-    const palette = quantize(rgba, 256, {
-      format: "rgba4444",
-      oneBitAlpha: true,
-    });
-    const indexedFrame = applyPalette(rgba, palette, "rgba4444");
-
-    gif.writeFrame(indexedFrame, apng.width, apng.height, {
-      palette,
-      delay: Math.max(20, Math.round(frame?.delay || 100)),
-      transparent: true,
-      transparentIndex: 0,
-      ...(index === 0 ? { repeat: 0 } : {}),
-    });
-    onConversionProgress?.({
-      completed: index + 1,
-      total: apng.frames.length,
-    });
-    await yieldToBrowser();
-  }
-
-  throwIfAborted(signal);
-  gif.finish();
-  return gifBytesToBlob(gif.bytes());
-}
-
-export function convertApngToGifBlob(
-  asset: QqAsset,
-  sourceBlob?: Blob,
-  options: MediaTaskOptions = {},
-): Promise<Blob> {
-  return cacheGeneratedGif(`apng:${asset.path}`, () =>
-    encodeApngToGifBlob(asset, sourceBlob, options),
-  );
-}
-
-async function encodeCanvasAsGif(
-  canvas: HTMLCanvasElement,
-  options: MediaTaskOptions = {},
-): Promise<Blob> {
-  const { onConversionProgress, signal } = options;
-  throwIfAborted(signal);
-  const { GIFEncoder, quantize, applyPalette } = await import("gifenc");
-  throwIfAborted(signal);
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("无法初始化 Canvas");
-
-  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-  onConversionProgress?.({ completed: 0, total: 1 });
-  const rgba = new Uint8Array(imageData.data);
-  const palette = quantize(rgba, 256, {
-    format: "rgba4444",
-    oneBitAlpha: true,
-  });
-  const indexedFrame = applyPalette(rgba, palette, "rgba4444");
-  const gif = GIFEncoder();
-  gif.writeFrame(indexedFrame, canvas.width, canvas.height, {
-    palette,
-    delay: 1000,
-    repeat: 0,
-    transparent: true,
-    transparentIndex: 0,
-  });
-  gif.finish();
-  onConversionProgress?.({ completed: 1, total: 1 });
-  throwIfAborted(signal);
-  return gifBytesToBlob(gif.bytes());
-}
-
-export function convertPngToGifBlob(
+export async function normalizeGifBlob(
   path: string,
   blob: Blob,
   options: MediaTaskOptions = {},
 ): Promise<Blob> {
-  return cacheGeneratedGif(`png:${path}`, async () => {
-    throwIfAborted(options.signal);
-    const bitmap = await createImageBitmap(blob);
-    try {
-      throwIfAborted(options.signal);
-      const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("无法初始化 Canvas");
-      context.drawImage(bitmap, 0, 0);
-      return await encodeCanvasAsGif(canvas, options);
-    } finally {
-      bitmap.close();
-    }
-  });
+  throwIfAborted(options.signal);
+  const result = await cacheGeneratedGif(`gif:${path}`, () =>
+    convertInWorker(blob, "gif", options),
+  );
+  throwIfAborted(options.signal);
+  return result;
 }
 
-export function convertTextToGifBlob(
+export async function convertApngToGifBlob(
+  asset: QqAsset,
+  sourceBlob?: Blob,
+  options: MediaTaskOptions = {},
+): Promise<Blob> {
+  throwIfAborted(options.signal);
+  const result = await cacheGeneratedGif(`apng:${asset.path}`, async () => {
+    const blob = sourceBlob || await fetchApngBlob(asset.path, options);
+    if (!blob) throw new Error("APNG 读取失败");
+    return convertInWorker(blob, "apng", options);
+  });
+  throwIfAborted(options.signal);
+  return result;
+}
+
+export async function convertPngToGifBlob(
+  path: string,
+  blob: Blob,
+  options: MediaTaskOptions = {},
+): Promise<Blob> {
+  throwIfAborted(options.signal);
+  const result = await cacheGeneratedGif(`png:${path}`, () =>
+    convertInWorker(blob, "png", options),
+  );
+  throwIfAborted(options.signal);
+  return result;
+}
+
+export async function convertTextToGifBlob(
   key: string,
   text: string,
   options: MediaTaskOptions = {},
 ): Promise<Blob> {
-  return cacheGeneratedGif(`text:${key}`, async () => {
-    throwIfAborted(options.signal);
+  throwIfAborted(options.signal);
+  const result = await cacheGeneratedGif(`text:${key}`, async () => {
     await document.fonts.ready;
     throwIfAborted(options.signal);
     const canvas = document.createElement("canvas");
-    canvas.width = 128;
-    canvas.height = 128;
+    canvas.width = 499;
+    canvas.height = 499;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("无法初始化 Canvas");
 
     const fontFamily =
       '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
-    let fontSize = 80;
+    let fontSize = 312;
     context.font = `${fontSize}px ${fontFamily}`;
     const measuredWidth = context.measureText(text).width;
-    if (measuredWidth > 112) {
-      fontSize = Math.max(24, Math.floor((fontSize * 112) / measuredWidth));
+    if (measuredWidth > 437) {
+      fontSize = Math.max(24, Math.floor((fontSize * 437) / measuredWidth));
       context.font = `${fontSize}px ${fontFamily}`;
     }
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.fillText(text, 64, 68);
-    return encodeCanvasAsGif(canvas, options);
+    context.fillText(text, 249.5, 265);
+    const png = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("无法生成表情图片"));
+      }, "image/png");
+    });
+    return convertInWorker(png, "png", options);
   });
+  throwIfAborted(options.signal);
+  return result;
 }
 
 export async function convertApngToGif(
