@@ -18,6 +18,7 @@ import {
   QqSysEmojiGroup,
 } from '../docs/types/QqSysEmoji'
 import { homedir } from 'os'
+import { uniqueAssetFiles } from './uniqueAssetFiles'
 
 /**
  * QQ Emoji 资源生成器
@@ -480,20 +481,22 @@ class FileManager {
       withFileTypes: true,
     })
 
-    await Promise.all(
+    const uniqueFiles = await uniqueAssetFiles(
       files
         .filter((file) => file.isFile() && !JUNK_FILE_NAMES.has(file.name))
-        .map(async (file) => {
-          const path = this.pathManager.getRelativePath(
-            resolve(file.parentPath, file.name)
-          )
-          emoji.assets.push({
-            type: assetType,
-            name: file.name,
-            path,
-          })
-        })
+        .map((file) => ({
+          name: file.name,
+          path: resolve(file.parentPath, file.name),
+        })),
+      emoji.emojiId
     )
+    for (const file of uniqueFiles) {
+      emoji.assets.push({
+        type: assetType,
+        name: file.name,
+        path: this.pathManager.getRelativePath(file.path),
+      })
+    }
   }
 
   /**

@@ -233,7 +233,9 @@ function preferredPngAsset(
 }
 
 function normalizeQq(items: QqEmoji[]): DisplayEmoji[] {
-  return [...items]
+  return items
+    // QQ 自带表情使用数字 ID，Unicode emoji 使用字符作为 ID。
+    .filter((item) => /^\d+$/.test(item.emojiId))
     .sort((a, b) => Number(a.emojiId) - Number(b.emojiId))
     .map((item) => {
       const hasStaticPreviewOverride = STATIC_PREVIEW_OVERRIDE_IDS.has(

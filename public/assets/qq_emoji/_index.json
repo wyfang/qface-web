@@ -3953,11 +3953,6 @@
       },
       {
         "type": 2,
-        "name": "270.png",
-        "path": "assets/qq_emoji/271/apng/270.png"
-      },
-      {
-        "type": 2,
         "name": "271.png",
         "path": "assets/qq_emoji/271/apng/271.png"
       }
@@ -9386,11 +9381,6 @@
     "assets": [
       {
         "type": 0,
-        "name": "466_0.png",
-        "path": "assets/qq_emoji/466/png/466_0.png"
-      },
-      {
-        "type": 0,
         "name": "466.png",
         "path": "assets/qq_emoji/466/png/466.png"
       },
@@ -9460,11 +9450,6 @@
     "assets": [
       {
         "type": 0,
-        "name": "468_0.png",
-        "path": "assets/qq_emoji/468/png/468_0.png"
-      },
-      {
-        "type": 0,
         "name": "468.png",
         "path": "assets/qq_emoji/468/png/468.png"
       },
@@ -9495,11 +9480,6 @@
     "animationWidth": 0,
     "animationHeigh": 0,
     "assets": [
-      {
-        "type": 0,
-        "name": "469_0.png",
-        "path": "assets/qq_emoji/469/png/469_0.png"
-      },
       {
         "type": 0,
         "name": "469.png",
